@@ -3,7 +3,10 @@ Exec { logoutput => true, path => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'] }
 stage {'openstack-custom-repo': before => Stage['main']}
 $mirror_type="default"
 class { 'openstack::mirantis_repos': stage => 'openstack-custom-repo', type=>$mirror_type }
-
+stage {'openstack-firewall': before => Stage['main']}
+class { '::openstack::firewall':
+   stage => 'openstack-firewall'
+}
 
 $deployment_id = '99'
 
@@ -195,6 +198,7 @@ node keystone {
     galera_node_address => $internal_address,
     galera_nodes => $swift_proxy_hostnames,
     galera_cluster_name => 'openstack',
+    primary_controller => $master_swift_proxy_nodes
   }
   # set up keystone admin users
   class { 'keystone::roles::admin':
