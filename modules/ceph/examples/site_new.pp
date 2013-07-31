@@ -752,7 +752,7 @@ node /fuel-compute-[\d+]/ {
     use_rbd		   => 'yes',
                 
   }
-    ceph::osd::deploy { '/dev/sdb':.
+    ceph::osd::deploy { '/dev/sdb':
 	osd_id  => '0',
     }
         
