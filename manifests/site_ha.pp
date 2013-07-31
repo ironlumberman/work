@@ -1,5 +1,376 @@
-#stage {'clocksync': before => Stage['main']}
+Exec { logoutput => true, path => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'] }
 
+stage {'openstack-custom-repo': before => Stage['main']}
+$mirror_type="default"
+class { 'openstack::mirantis_repos': stage => 'openstack-custom-repo', type=>$mirror_type }
+
+
+$deployment_id = '99'
+
+
+### GENERAL CONFIG ###
+# This section sets main parameters such as hostnames and IP addresses of different nodes
+
+# This is the name of the public interface. The public network provides address space for Floating IPs, as well as public IP accessibility to the API endpoints.
+$public_interface = "eth0"
+$public_br           = 'br-ex'
+
+# This is the name of the internal interface. It will be attached to the management network, where data exchange between components of the OpenStack cluster will happen.
+$internal_interface = "eth1"
+$internal_br         = 'br-mgmt'
+
+# This is the name of the private interface. All traffic within OpenStack tenants' networks will go through this interface.
+#$private_interface = "eth2"
+
+# Public and Internal VIPs. These virtual addresses are required by HA topology and will be managed by keepalived.
+$internal_virtual_ip = "10.10.10.206"
+# Change this IP to IP routable from your 'public' network,
+# e. g. Internet or your office LAN, in which your public 
+# interface resides
+$public_virtual_ip = "192.168.122.206"
+#$private_virtual_ip = "10.10.11.205"
+#
+# Example file for building out a multi-node environment
+#
+# This example creates nodes of the following roles:
+#   swift_storage - nodes that host storage servers
+#   swift_proxy - nodes that serve as a swift proxy
+#   swift_ringbuilder - nodes that are responsible for
+#     rebalancing the rings
+#
+# This example assumes a few things:
+#   * the multi-node scenario requires a puppetmaster
+#   * it assumes that networking is correctly configured
+#
+# These nodes need to be brought up in a certain order
+#
+# 1. storage nodes
+# 2. ringbuilder
+# 3. run the storage nodes again (to synchronize the ring db)
+# 4. run the proxy
+# 5. test that everything works!!
+# this site manifest serves as an example of how to
+# deploy various swift environments
+
+$nodes_harr = [
+  {
+    'name' => 'swiftproxy-01',
+    'role' => 'primary-swift-proxy',
+    'internal_address' => '10.10.10.201',
+    'public_address'   => '192.168.122.201',
+  }, 
+  {
+    'name' => 'swiftproxy-02',
+    'role' => 'swift-proxy',
+    'internal_address' => '10.10.10.205',
+    'public_address'   => '192.168.122.205',
+  } ,
+  {
+    'name' => 'swift-01',
+    'role' => 'storage',
+    'internal_address' => '10.10.10.101',
+    'public_address'   => '192.168.122.101',
+    'swift_zone'       => 1,
+    'mountpoints'=> "1 2\n 2 1",
+    'storage_local_net_ip' => '192.168.122.101',
+  },
+  {
+    'name' => 'swift-02',
+    'role' => 'storage',
+    'internal_address' => '10.10.10.102',
+    'public_address'   => '192.168.122.102',
+    'swift_zone'       => 2,
+    'mountpoints'=> "1 2\n 2 1",
+    'storage_local_net_ip' => '192.168.122.102',
+  }
+#  ,
+#  {
+#    'name' => 'swift-03',
+#    'role' => 'storage',
+#    'internal_address' => '10.10.10.102',
+#    'public_address'   => '192.168.122.102',
+#    'swift_zone'       => 3,
+#    'mountpoints'=> "1 2\n 2 1",
+#    'storage_local_net_ip' => '192.168.122.102',
+#  },
+#  {
+#    'name' => 'swift-04',
+#    'role' => 'storage',
+#    'internal_address' => '10.10.10.103',
+#    'public_address'   => '192.168.122.103',
+#    'swift_zone'       => 4,
+#    'mountpoints'=> "1 2\n 2 1",
+#    'storage_local_net_ip' => '192.168.122.103',
+#  }
+]
+
+$nodes = $nodes_harr
+
+$internal_netmask = '255.255.255.0'
+$public_netmask = '255.255.255.0'
+
+$default_gateway = "192.168.122.100"
+
+# Specify nameservers here.
+# Need points to cobbler node IP, or to special prepared nameservers if you known what you do.
+$dns_nameservers = ["192.168.122.100","8.8.8.8"]
+
+
+$node = filter_nodes($nodes,'name',$::hostname)
+if empty($node) {
+  fail("Node $::hostname is not defined in the hash structure")
+}
+$internal_address = $node[0]['internal_address']
+$public_address = $node[0]['public_address']
+
+$swift_local_net_ip      = $internal_address
+
+if $node[0]['role'] == 'primary-swift-proxy' {
+  $primary_proxy = true
+} else {
+  $primary_proxy = false
+}
+
+
+$master_swift_proxy_nodes = filter_nodes($nodes,'role','primary-swift-proxy')
+$master_swift_proxy_ip = $master_swift_proxy_nodes[0]['internal_address']
+
+$swift_proxy_nodes = merge_arrays(filter_nodes($nodes,'role','primary-swift-proxy'),filter_nodes($nodes,'role','swift-proxy'))
+$swift_proxies = nodes_to_hash($swift_proxy_nodes,'name','internal_address')
+$swift_internal_addresses = $swift_proxies
+$swift_public_addresses = nodes_to_hash($swift_proxy_nodes,'name','public_address')
+$swift_proxy_hostnames = keys($swift_internal_addresses)
+
+
+$nv_physical_volume     = ['vdb','vdc'] 
+$swift_loopback = false
+$swift_user_password     = 'swift'
+
+$verbose                = true
+$admin_email          = 'dan@example_company.com'
+$keystone_db_password = 'keystone'
+$keystone_admin_token = 'keystone_token'
+$admin_user           = 'admin'
+$admin_password       = 'nova'
+
+node keystone {
+      #set up mysql server
+#  class { 'mysql::server':
+#    config_hash => {
+#      # the priv grant fails on precise if I set a root password
+#      # TODO I should make sure that this works
+#      'root_password' => $mysql_root_password,
+ #     'bind_address'  => $public_address
+ #   }
+ #}
+  # set up all openstack databases, users, grants
+#  class { 'keystone::db::mysql':
+#   password => $keystone_db_password,
+#}
+
+
+  # install and configure the keystone service
+  class { 'keystone':
+    admin_token  => $keystone_admin_token,
+    # we are binding keystone on all interfaces
+    # the end user may want to be more restrictive
+    bind_host    => $internal_address,
+    verbose  => $verbose,
+    debug    => $verbose,
+    catalog_type => 'mysql',
+  }
+
+  # set up keystone database
+  # set up the keystone config for mysql
+  class { 'openstack::db::mysql':
+    keystone_db_password => $keystone_db_password,
+    nova_db_password => $keystone_db_password,
+    mysql_root_password => $keystone_db_password,
+    cinder_db_password => $keystone_db_password,
+    glance_db_password => $keystone_db_password,
+    quantum_db_password => $keystone_db_password,
+    mysql_bind_address => $internal_address,
+    custom_setup_class => 'galera',
+    enabled                  => true,
+    galera_node_address => $internal_address,
+    galera_nodes => $swift_proxy_hostnames,
+    galera_cluster_name => 'openstack',
+  }
+  # set up keystone admin users
+  class { 'keystone::roles::admin':
+    email    => $admin_email,
+    password => $admin_password,
+  }
+  # configure the keystone service user and endpoint
+  class { 'swift::keystone::auth':
+    password => $swift_user_password,
+    #address  => "192.168.122.205",
+    address  => $public_address,
+  }
+}
+
+# The following specifies 3 swift storage nodes
+node /swift-[\d+]/ {
+
+  include stdlib
+  class { 'operatingsystem::checksupported':
+      stage => 'setup'
+  }
+
+  $swift_zone = $node[0]['swift_zone']
+
+  class { 'openstack::swift::storage_node':
+#    storage_type           => $swift_loopback,
+    swift_zone             => $swift_zone,
+    swift_local_net_ip     => $swift_local_net_ip,
+    master_swift_proxy_ip  => $master_swift_proxy_ip,
+#    nv_physical_volume     => $nv_physical_volume,
+    storage_devices    => $nv_physical_volume,
+    storage_base_dir     => '/dev/',
+    db_host                => $internal_virtual_ip,
+    service_endpoint       => $internal_virtual_ip,
+    cinder       => false
+  }
+
+}
+
+node /swiftproxy-[\d+]/ inherits keystone {
+  
+  include stdlib
+  class { 'operatingsystem::checksupported':
+      stage => 'setup'
+  }
+   $primary_proxy = true
+  if $primary_proxy {
+    ring_devices {'all':
+      storages => filter_nodes($nodes, 'role', 'storage')
+    }
+  }
+
+  class { 'openstack::swift::proxy':
+    swift_user_password     => $swift_user_password,
+    swift_proxies           => $swift_proxies,
+    primary_proxy           => $primary_proxy,
+    controller_node_address => $internal_address,
+    swift_local_net_ip      => $internal_address,
+    master_swift_proxy_ip   => $internal_address,
+  }
+  
+  
+
+
+    # haproxy
+    include haproxy::params
+
+    Haproxy_service {
+      balancers => $swift_proxies
+    }
+
+    file { '/etc/rsyslog.d/haproxy.conf':
+      ensure => present,
+      content => 'local0.* -/var/log/haproxy.log'
+    }
+#    Class['keepalived'] -> Class ['nova::rabbitmq']
+
+    haproxy_service { 'keystone-1': order => 20, port => 35357, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
+    haproxy_service { 'keystone-2': order => 30, port => 5000, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
+    haproxy_service { 'rabbitmq-epmd':    order => 91, port => 4369, virtual_ips => [$internal_virtual_ip], define_backend => true }
+#    haproxy_service { 'rabbitmq-openstack':    order => 92, port => 5672, virtual_ips => [$internal_virtual_ip], define_backend => true }
+    haproxy_service { 'mysqld': order => 95, port => 3306, virtual_ips => [$internal_virtual_ip], define_backend => true }
+    haproxy_service { 'swift': order => 96, port => 8080, virtual_ips => [$public_virtual_ip,$internal_virtual_ip], balancers => $swift_proxies }
+   
+
+    exec { 'up-public-interface':
+      command => "ifconfig ${public_interface} up",
+      path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
+    }
+    exec { 'up-internal-interface':
+      command => "ifconfig ${internal_interface} up",
+      path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
+    }
+#    exec { 'up-private-interface':
+#      command => "ifconfig ${private_interface} up",
+#      path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
+ #   }
+
+ #   if $primary_controller {
+      exec { 'create-public-virtual-ip':
+        command => "ip addr add ${public_virtual_ip} dev ${public_interface} label ${public_interface}:ka",
+        unless  => "ip addr show dev ${public_interface} | grep -w ${public_virtual_ip}",
+        path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
+        before  => Service['keepalived'],
+        require => Exec['up-public-interface'],
+      }
+ #   }
+
+    keepalived_dhcp_hook {$public_interface:interface=>$public_interface}
+    if $internal_interface != $public_interface {
+      keepalived_dhcp_hook {$internal_interface:interface=>$internal_interface}
+    }
+
+    Keepalived_dhcp_hook<| |> {before =>Service['keepalived']}
+
+ #   if $primary_controller {
+      exec { 'create-internal-virtual-ip':
+        command => "ip addr add ${internal_virtual_ip} dev ${internal_interface} label ${internal_interface}:ka",
+        unless  => "ip addr show dev ${internal_interface} | grep -w ${internal_virtual_ip}",
+        path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
+        before  => Service['keepalived'],
+        require => Exec['up-internal-interface'],
+      }
+#    }
+    sysctl::value { 'net.ipv4.ip_nonlocal_bind': value => '1' }
+
+    package { 'socat': ensure => present }
+    exec { 'wait-for-haproxy-mysql-backend':
+      command   => "echo show stat | socat unix-connect:///var/lib/haproxy/stats stdio | grep -q '^mysqld,BACKEND,.*,UP,'",
+      path      => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
+      require   => [Service['haproxy'], Package['socat']],
+      try_sleep => 5,
+      tries     => 60,
+    }
+
+    Exec<| title == 'wait-for-synced-state' |> -> Exec['wait-for-haproxy-mysql-backend']
+    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'initial-db-sync' |>
+    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'keystone-manage db_sync' |>
+
+    class { 'haproxy':
+      enable => true,
+      global_options   => merge($::haproxy::params::global_options, {'log' => "/dev/log local0"}),
+      defaults_options => merge($::haproxy::params::defaults_options, {'mode' => 'http'}),
+      require => Sysctl::Value['net.ipv4.ip_nonlocal_bind'],
+    }
+    
+    
+    # keepalived
+    $public_vrid   = $::deployment_id
+    $internal_vrid = $::deployment_id + 1
+
+    class { 'keepalived':
+      require => Class['haproxy'] ,
+    }
+
+    keepalived::instance { $public_vrid:
+      interface => $public_interface,
+      virtual_ips => [$public_virtual_ip],
+      state    => $primary_controller ? { true => 'MASTER', default => 'BACKUP' },
+      priority => $primary_controller ? { true => 101,      default => 100      },
+    }
+    keepalived::instance { $internal_vrid:
+      interface => $internal_interface,
+      virtual_ips => [$internal_virtual_ip],
+      state    => $primary_controller ? { true => 'MASTER', default => 'BACKUP' },
+      priority => $primary_controller ? { true => 101,      default => 100      },
+    }
+
+
+   Class['haproxy'] -> Class['galera']
+  
+  
+ } 
+
+########## define HA sevices ###########
+  
 define haproxy_service($order, $balancers, $virtual_ips, $port, $define_cookies = false, $define_backend = false) {
 
   case $name {
@@ -9,49 +380,11 @@ define haproxy_service($order, $balancers, $virtual_ips, $port, $define_cookies 
       $balancer_port = 3307
     }
 
-    "swift-proxy": {
-      $haproxy_config_options = {
-        'option'  => ['forwardfor', 'httpchk', 'httpclose', 'httplog'],
-        'rspidel' => '^Set-cookie:\ IP=',
-        'balance' => 'roundrobin',
-        'cookie'  => 'SERVERID insert indirect nocache',
-        'capture' => 'cookie vgnvisitor= len 32'
-      }
-      $balancermember_options = 'check inter 2000 fall 3'
-      $balancer_port = 80
+    "rabbitmq-epmd": {
+      $haproxy_config_options = { 'option' => ['clitcpka'], 'balance' => 'roundrobin', 'mode' => 'tcp'}
+      $balancermember_options = 'check inter 5000 rise 2 fall 3'
+      $balancer_port = 4369
     }
-
-#    "horizon": {
-#      $haproxy_config_options = {
-#        'option'  => ['forwardfor', 'httpchk', 'httpclose', 'httplog'],
-#        'rspidel' => '^Set-cookie:\ IP=',
-        # 'stick'   => 'on src table horizon-ssl',
-#        'balance' => 'roundrobin',
-#        'cookie'  => 'SERVERID insert indirect nocache',
-#        'capture' => 'cookie vgnvisitor= len 32'
-#      }
-#      $balancermember_options = 'check inter 2000 fall 3'
-#      $balancer_port = 80
-#    }
-
-#    "horizon-ssl": {
-#      $haproxy_config_options = {
-#        'option'      => ['ssl-hello-chk', 'tcpka'],
-#        'stick-table' => 'type ip size 200k expire 30m',
-#        'stick'       => 'on src',
-#        'balance'     => 'source',
-#        'timeout'     => ['client 3h', 'server 3h'],
-#        'mode'        => 'tcp'
-#      }
-#      $balancermember_options = 'weight 1 check'
-#      $balancer_port = 443
-#    }
-
-#    "rabbitmq-epmd": {
-#      $haproxy_config_options = { 'option' => ['clitcpka'], 'balance' => 'roundrobin', 'mode' => 'tcp'}
-#      $balancermember_options = 'check inter 5000 rise 2 fall 3'
-#      $balancer_port = 4369
-#    }
 #    "rabbitmq-openstack": {
 #      $haproxy_config_options = { 'option' => ['tcpka'], 'timeout client' => '48h', 'timeout server' => '48h', 'balance' => 'roundrobin', 'mode' => 'tcp'}
 #      $balancermember_options = 'check inter 5000 rise 2 fall 3'
@@ -120,314 +453,5 @@ define keepalived_dhcp_hook($interface)
     file {"/etc/dhcp/dhclient-${interface}-up-hooks": content=>$up_hook, mode => 744 }
 }
 
+################### end define HA sevices #################################
 
-
-#class openstack::controller_ha (
-#   $primary_controller,
-#   $controller_public_addresses, $public_interface, $private_interface, $controller_internal_addresses,
-#   $internal_virtual_ip, $public_virtual_ip, $internal_interface, $internal_address,
-#   $floating_range, $fixed_range, $multi_host, $network_manager, $verbose, $network_config = {}, $num_networks = 1, $network_size = 255,
-#   $auto_assign_floating_ip, $mysql_root_password, $admin_email, $admin_user = 'admin', $admin_password, $keystone_admin_tenant='admin',
-#   $keystone_db_password, $keystone_admin_token, $glance_db_password, $glance_user_password,
-#   $nova_db_password, $nova_user_password, $rabbit_password, $rabbit_user,
-#   $rabbit_nodes, $memcached_servers, $export_resources, $glance_backend='file', $swift_proxies=undef,
-#   $quantum = false, $quantum_user_password='', $quantum_db_password='', $quantum_db_user = 'quantum',
-#   $quantum_db_dbname  = 'quantum', $cinder = false, $cinder_iscsi_bind_addr = false, $tenant_network_type = 'gre', $segment_range = '1:4094',
-#   $nv_physical_volume = undef, $manage_volumes = false,$galera_nodes, $use_syslog = false,
-#   $cinder_rate_limits = undef, $nova_rate_limits = undef,
-#   $cinder_volume_group     = 'cinder-volumes',
-#   $cinder_user_password    = 'cinder_user_pass',
-#   $cinder_db_password      = 'cinder_db_pass',
-#   $rabbit_node_ip_address  = $internal_address,
-#   $horizon_use_ssl         = false,
-#   $quantum_network_node    = false,
-#   $quantum_netnode_on_cnt  = false,
-#   $quantum_gre_bind_addr   = $internal_address,
-#   $quantum_external_ipinfo = {},
-#   $mysql_skip_name_resolve = false,
-#   $ha_provider             = "pacemaker",
-#   $create_networks         = true,
-#   $use_unicast_corosync    = false,
-#   $ha_mode                 = true,
-#   $rbd_user		    = 'images',
-#   $rbd_pool		    = 'images',
-#   $cinder_use_rbd         = 'no',
-#   $cinder_rbd_user         = 'volumes',
-#   $cinder_rbd_pool         = 'volumes',
-#   $cinder_rbd_uuid         = '143b14f0-54ba-4c21-ba11-8b08c33c5375',
-                     
-# ) {
-
-    # haproxy
-    include haproxy::params
-
-    Haproxy_service {
-      balancers => $controller_internal_addresses
-    }
-
-    file { '/etc/rsyslog.d/haproxy.conf':
-      ensure => present,
-      content => 'local0.* -/var/log/haproxy.log'
-    }
-#    Class['keepalived'] -> Class ['nova::rabbitmq']
-#    haproxy_service { 'horizon':    order => 15, port => 80, virtual_ips => [$public_virtual_ip], define_cookies => true  }
-
-#    if $horizon_use_ssl {
-#      haproxy_service { 'horizon-ssl': order => 17, port => 443, virtual_ips => [$public_virtual_ip] }
-#    }
-
-#    haproxy_service { 'keystone-1': order => 20, port => 5000, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-#    haproxy_service { 'keystone-2': order => 30, port => 35357, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-#    haproxy_service { 'nova-api-1': order => 40, port => 8773, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-#    haproxy_service { 'nova-api-2': order => 50, port => 8774, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-
-#    if ! $multi_host {
-#      haproxy_service { 'nova-api-3': order => 60, port => 8775, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-#    }
-
-#    haproxy_service { 'nova-api-4': order => 70, port => 8776, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-#    haproxy_service { 'glance-api': order => 80, port => 9292, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-
-#    if $quantum {
-#      haproxy_service { 'quantum': order => 85, port => 9696, virtual_ips => [$public_virtual_ip, $internal_virtual_ip]  }
-#    }
-
-#    haproxy_service { 'glance-reg': order => 90, port => 9191, virtual_ips => [$internal_virtual_ip]  }
-#    haproxy_service { 'rabbitmq-epmd':    order => 91, port => 4369, virtual_ips => [$internal_virtual_ip], define_backend => true }
-#    haproxy_service { 'rabbitmq-openstack':    order => 92, port => 5672, virtual_ips => [$internal_virtual_ip], define_backend => true }
-#    haproxy_service { 'mysqld': order => 95, port => 3306, virtual_ips => [$internal_virtual_ip], define_backend => true }
-#    if $glance_backend == 'swift' {
-#      haproxy_service { 'swift': order => 96, port => 8080, virtual_ips => [$public_virtual_ip,$internal_virtual_ip], balancers => $swift_proxies }
-#    } 
-#    if $glance_backend == 'rbd' {
-#      haproxy_service { 'radosgw': order => 96, port => 8080, virtual_ips => [$public_virtual_ip,$internal_virtual_ip], balancers => $swift_proxies }
-#    }
-
-
-    exec { 'up-public-interface':
-      command => "ifconfig ${public_interface} up",
-      path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-    }
-    exec { 'up-internal-interface':
-      command => "ifconfig ${internal_interface} up",
-      path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-    }
-    exec { 'up-private-interface':
-      command => "ifconfig ${private_interface} up",
-      path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-    }
-
-    if $primary_controller {
-      exec { 'create-public-virtual-ip':
-        command => "ip addr add ${public_virtual_ip} dev ${public_interface} label ${public_interface}:ka",
-        unless  => "ip addr show dev ${public_interface} | grep -w ${public_virtual_ip}",
-        path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-        before  => Service['keepalived'],
-        require => Exec['up-public-interface'],
-      }
-    }
-
-    keepalived_dhcp_hook {$public_interface:interface=>$public_interface}
-    if $internal_interface != $public_interface {
-      keepalived_dhcp_hook {$internal_interface:interface=>$internal_interface}
-    }
-
-    Keepalived_dhcp_hook<| |> {before =>Service['keepalived']}
-
-    if $primary_controller {
-      exec { 'create-internal-virtual-ip':
-        command => "ip addr add ${internal_virtual_ip} dev ${internal_interface} label ${internal_interface}:ka",
-        unless  => "ip addr show dev ${internal_interface} | grep -w ${internal_virtual_ip}",
-        path    => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-        before  => Service['keepalived'],
-        require => Exec['up-internal-interface'],
-      }
-    }
-    sysctl::value { 'net.ipv4.ip_nonlocal_bind': value => '1' }
-
-#    package { 'socat': ensure => present }
-#    exec { 'wait-for-haproxy-mysql-backend':
-#      command   => "echo show stat | socat unix-connect:///var/lib/haproxy/stats stdio | grep -q '^mysqld,BACKEND,.*,UP,'",
-#      path      => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-#      require   => [Service['haproxy'], Package['socat']],
-#      try_sleep => 5,
-#      tries     => 60,
-#    }
-
-#    Exec<| title == 'wait-for-synced-state' |> -> Exec['wait-for-haproxy-mysql-backend']
-#    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'initial-db-sync' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'keystone-manage db_sync' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'glance-manage db_sync' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'cinder-manage db_sync' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Exec<| title == 'nova-db-sync' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Service <| title == 'cinder-scheduler' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Service <| title == 'cinder-volume' |>
-#    Exec['wait-for-haproxy-mysql-backend'] -> Service <| title == 'cinder-api' |>
-
-    class { 'haproxy':
-      enable => true,
-      global_options   => merge($::haproxy::params::global_options, {'log' => "/dev/log local0"}),
-      defaults_options => merge($::haproxy::params::defaults_options, {'mode' => 'http'}),
-      require => Sysctl::Value['net.ipv4.ip_nonlocal_bind'],
-    }
-
-#    exec { 'create-keepalived-rules':
-#        command => "iptables -I INPUT -m pkttype --pkt-type multicast -d 224.0.0.18 -j ACCEPT && /etc/init.d/iptables save ",
-#        unless => "iptables-save  | grep '\-A INPUT -d 224.0.0.18/32 -m pkttype --pkt-type multicast -j ACCEPT' -q",
-#        path => ['/usr/bin', '/usr/sbin', '/sbin', '/bin'],
-#        before => Service['keepalived'],
-#        require => Class['::openstack::firewall']
-#    }
-
-    # keepalived
-    $public_vrid   = $::deployment_id
-    $internal_vrid = $::deployment_id + 1
-
-    class { 'keepalived':
-      require => Class['haproxy'] ,
-    }
-
-    keepalived::instance { $public_vrid:
-      interface => $public_interface,
-      virtual_ips => [$public_virtual_ip],
-      state    => $primary_controller ? { true => 'MASTER', default => 'BACKUP' },
-      priority => $primary_controller ? { true => 101,      default => 100      },
-    }
-    keepalived::instance { $internal_vrid:
-      interface => $internal_interface,
-      virtual_ips => [$internal_virtual_ip],
-      state    => $primary_controller ? { true => 'MASTER', default => 'BACKUP' },
-      priority => $primary_controller ? { true => 101,      default => 100      },
-    }
-
-#   Class['haproxy'] -> Class['galera']
-
-#    class { '::openstack::controller':
-#      public_address          => $public_virtual_ip,
-#      public_interface        => $public_interface,
-#      private_interface       => $private_interface,
-#      internal_address        => $internal_virtual_ip,
-#      admin_address           => $internal_virtual_ip,
-#      floating_range          => $floating_range,
-#      fixed_range             => $fixed_range,
-#      multi_host              => $multi_host,
-#      network_config          => $network_config,
-#      num_networks            => $num_networks,
-#      network_size            => $network_size,
-#      network_manager         => $network_manager,
-#      verbose                 => $verbose,
-#      auto_assign_floating_ip => $auto_assign_floating_ip,
-#      mysql_root_password     => $mysql_root_password,
-#      custom_mysql_setup_class=> 'galera',
-#      galera_cluster_name     => 'openstack',
-#      primary_controller      => $primary_controller,
-#      galera_node_address     => $internal_address,
-#      galera_nodes            => $galera_nodes,
-#      mysql_skip_name_resolve => $mysql_skip_name_resolve,
-#      admin_email             => $admin_email,
-#      admin_user              => $admin_user,
-#      admin_password          => $admin_password,
-#      keystone_db_password    => $keystone_db_password,
-#      keystone_admin_token    => $keystone_admin_token,
-#      keystone_admin_tenant   => $keystone_admin_tenant,
-#      glance_db_password      => $glance_db_password,
-#      glance_user_password    => $glance_user_password,
-#      nova_db_password        => $nova_db_password,
-#      nova_user_password      => $nova_user_password,
-#      rabbit_password         => $rabbit_password,
-#      rabbit_user             => $rabbit_user,
-#      rabbit_cluster          => true,
-#      rabbit_nodes            => $controller_hostnames,
-#      rabbit_port             => '5673',
-#      rabbit_node_ip_address  => $rabbit_node_ip_address,
-#      rabbit_ha_virtual_ip    => $internal_virtual_ip,
-#      cache_server_ip         => $memcached_servers,
-#      export_resources        => false,
-#      api_bind_address        => $internal_address,
-#      db_host                 => $internal_virtual_ip,
-#      service_endpoint        => $internal_virtual_ip,
-#      glance_backend          => $glance_backend,
-#      require                 => Service['keepalived'],
-#      quantum                 => $quantum,
-#      quantum_user_password   => $quantum_user_password,
-#      quantum_db_password     => $quantum_db_password,
-     #quantum_l3_enable       => $primary_controller,
-#      quantum_gre_bind_addr   => $quantum_gre_bind_addr,
-#      quantum_external_ipinfo => $quantum_external_ipinfo,
-#      quantum_network_node    => $quantum_network_node,
-#      quantum_netnode_on_cnt  => $quantum_netnode_on_cnt,
-#      segment_range           => $segment_range,
-#      tenant_network_type     => $tenant_network_type,
-#      cinder                  => $cinder,
-#      cinder_iscsi_bind_addr  => $cinder_iscsi_bind_addr,
-#      cinder_user_password    => $cinder_user_password,
-#      cinder_db_password      => $cinder_db_password,
-#      manage_volumes          => $manage_volumes,
-#      nv_physical_volume      => $nv_physical_volume,
-#      cinder_volume_group     => $cinder_volume_group,
-#      cinder_use_rbd          => $cinder_use_rbd,
-#      cinder_rbd_user         => $cinder_rbd_user,
-#      cinder_rbd_pool         => $cinder_rbd_pool,
-#      cinder_rbd_uuid         => $cinder_rbd_uuid,
-      # turn on SWIFT_ENABLED option for Horizon dashboard
-#      swift                   => $glance_backend ? { 'swift' => true, default => false },
-#      use_syslog              => $use_syslog,
-#      cinder_rate_limits      => $cinder_rate_limits,
-#      nova_rate_limits        => $nova_rate_limits,
-#      horizon_use_ssl         => $horizon_use_ssl,
-#      ha_mode                 => $ha_mode,
-#      rbd_user		      => $rbd_user,
-#      rbd_pool		      => $rbd_pool,
-#    }
-#    if $quantum and $quantum_network_node {
-#      class { '::openstack::quantum_router':
-#        db_host               => $internal_virtual_ip,
-#        service_endpoint      => $internal_virtual_ip,
-#        auth_host             => $internal_virtual_ip,
-#        internal_address      => $internal_address,
-#        public_interface      => $public_interface,
-#        private_interface     => $private_interface,
-#        floating_range        => $floating_range,
-#        fixed_range           => $fixed_range,
-#        create_networks       => $create_networks,
-#        verbose               => $verbose,
-#        rabbit_password       => $rabbit_password,
-#        rabbit_user           => $rabbit_user,
-#        rabbit_nodes          => $rabbit_nodes,
-#        rabbit_ha_virtual_ip  => $internal_virtual_ip,
-#        quantum               => $quantum,
-#        quantum_user_password => $quantum_user_password,
-#        quantum_db_password   => $quantum_db_password,
-#        quantum_db_user       => $quantum_db_user,
-#        quantum_db_dbname     => $quantum_db_dbname,
-#        quantum_gre_bind_addr => $quantum_gre_bind_addr,
-#        quantum_network_node  => $quantum_network_node,
-#        quantum_netnode_on_cnt=> $quantum_netnode_on_cnt,
-#        service_provider      => $ha_provider,
-#        tenant_network_type   => $tenant_network_type,
-#        segment_range         => $segment_range,
-#        external_ipinfo       => $external_ipinfo,
-#        api_bind_address      => $internal_address,
-#        use_syslog            => $use_syslog,
-#        ha_mode               => $ha_mode,
-#      }
-#    }
-#    class { 'openstack::auth_file':
-#      admin_user              => $admin_user,
-#      admin_password          => $admin_password,
-#      admin_tenant            => $keystone_admin_tenant,
-#      keystone_admin_token    => $keystone_admin_token,
-#      controller_node         => $internal_virtual_ip,
-#    }
-#    if $ha_provider == 'pacemaker' {
-#      if $use_unicast_corosync {
-#        $unicast_addresses = $controller_internal_addresses
-#      } else {
-#        $unicast_addresses = undef
-#      }
-#      class {'openstack::corosync':
-#        bind_address => $internal_address,
-#        unicast_addresses => $unicast_addresses
-#      }
-#    }
-#}
