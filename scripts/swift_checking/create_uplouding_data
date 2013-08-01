@@ -1,0 +1,13 @@
+rm -rf UPLOADING_DATA
+
+mkdir -p UPLOADING_DATA/container1
+mkdir -p UPLOADING_DATA/container2
+#mkdir -p UPLOADING_DATA/container3
+
+for i in {1..300}; do 
+  echo $i > UPLOADING_DATA/container1/$i
+done
+
+for i in {a..z}[A..L]; do
+  echo $i > UPLOADING_DATA/container2/$i
+done
